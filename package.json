@@ -33,10 +33,15 @@
         },
         "copilotUsageTracker.barLength": {
           "type": "number",
-          "default": 10,
+          "default": 12,
           "minimum": 5,
           "maximum": 20,
-          "description": "Character width of each progress bar."
+          "description": "Character width of the stacked progress bar."
+        },
+        "copilotUsageTracker.githubOrg": {
+          "type": "string",
+          "default": "",
+          "description": "(Optional) GitHub organisation name — enables auto-fetching your Copilot usage via the org billing API."
         }
       }
     },
@@ -60,6 +65,14 @@
       {
         "command": "copilotUsageTracker.setLimit",
         "title": "Copilot Tracker: Set Monthly Request Limit"
+      },
+      {
+        "command": "copilotUsageTracker.fetchUsage",
+        "title": "Copilot Tracker: Fetch Usage from GitHub"
+      },
+      {
+        "command": "copilotUsageTracker.loginGitHub",
+        "title": "Copilot Tracker: Sign in to GitHub"
       }
     ]
   },

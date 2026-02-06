@@ -1,67 +1,78 @@
 import * as vscode from 'vscode';
+import * as https from 'https';
 
-// ── Unicode bar characters ──────────────────────────────────────────
-const FILLED = '█';
-const EMPTY   = '░';
+// ══════════════════════════════════════════════════════════════════════
+//  Stacked-bar characters  (top row = month, bottom row = copilot)
+// ══════════════════════════════════════════════════════════════════════
+const BOTH = '█';   // Full block  — both filled
+const TOP  = '▀';   // Upper half  — only month filled
+const BOT  = '▄';   // Lower half  — only copilot filled
+const NONE = '░';   // Light shade — neither filled
 
-// ── State ───────────────────────────────────────────────────────────
-let monthItem: vscode.StatusBarItem;
-let copilotItem: vscode.StatusBarItem;
-let timer: ReturnType<typeof setInterval>;
+// ── State ────────────────────────────────────────────────────────────
+let statusItem: vscode.StatusBarItem;
+let refreshTimer: ReturnType<typeof setInterval>;
+let fetchTimer: ReturnType<typeof setInterval>;
 
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
 //  Activation
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
 
-export function activate(context: vscode.ExtensionContext) {
+export function activate(ctx: vscode.ExtensionContext) {
+  autoResetIfNewMonth(ctx);
 
-  // Reset counter when the calendar month rolls over
-  autoResetIfNewMonth(context);
+  // Single status-bar item — sits right of centre, near Copilot button
+  statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 200);
+  statusItem.command = 'copilotUsageTracker.setUsage';
+  ctx.subscriptions.push(statusItem);
 
-  // ── Status-bar items (Right-aligned, adjacent priorities) ──────
-  //   Higher priority → further LEFT inside the right section,
-  //   so monthItem (201) sits just left of copilotItem (200).
-  monthItem   = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 201);
-  copilotItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 200);
+  // ── Commands ────────────────────────────────────────────────────
+  const cmds: [string, () => any][] = [
+    ['copilotUsageTracker.setUsage',       () => cmdSetUsage(ctx)],
+    ['copilotUsageTracker.incrementUsage', () => cmdIncrement(ctx)],
+    ['copilotUsageTracker.resetUsage',     () => cmdReset(ctx)],
+    ['copilotUsageTracker.refresh',        () => refresh(ctx)],
+    ['copilotUsageTracker.setLimit',       () => cmdSetLimit()],
+    ['copilotUsageTracker.fetchUsage',     () => cmdFetchUsage(ctx)],
+    ['copilotUsageTracker.loginGitHub',    () => cmdLoginGitHub(ctx)],
+  ];
+  for (const [id, handler] of cmds) {
+    ctx.subscriptions.push(vscode.commands.registerCommand(id, handler));
+  }
 
-  // ── Commands ───────────────────────────────────────────────────
-  context.subscriptions.push(
-    vscode.commands.registerCommand('copilotUsageTracker.setUsage',       () => cmdSetUsage(context)),
-    vscode.commands.registerCommand('copilotUsageTracker.incrementUsage', () => cmdIncrement(context)),
-    vscode.commands.registerCommand('copilotUsageTracker.resetUsage',     () => cmdReset(context)),
-    vscode.commands.registerCommand('copilotUsageTracker.refresh',        () => updateBars(context)),
-    vscode.commands.registerCommand('copilotUsageTracker.setLimit',       () => cmdSetLimit()),
-  );
-
-  // ── React to setting changes ──────────────────────────────────
-  context.subscriptions.push(
+  // ── React to config changes ─────────────────────────────────────
+  ctx.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('copilotUsageTracker')) {
-        updateBars(context);
-      }
+      if (e.affectsConfiguration('copilotUsageTracker')) { render(ctx); }
     }),
   );
 
-  // ── Disposables ───────────────────────────────────────────────
-  context.subscriptions.push(monthItem, copilotItem);
+  // ── First render + silent auto-fetch attempt ────────────────────
+  refresh(ctx);
 
-  // ── First render + periodic refresh (every 60 s) ──────────────
-  updateBars(context);
-  timer = setInterval(() => {
-    autoResetIfNewMonth(context);
-    updateBars(context);
+  // Refresh display every 60 s (month % ticks forward)
+  refreshTimer = setInterval(() => {
+    autoResetIfNewMonth(ctx);
+    render(ctx);
   }, 60_000);
 
-  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+  // Auto-fetch from GitHub every 15 min
+  fetchTimer = setInterval(() => fetchUsageFromGitHub(ctx, true), 15 * 60_000);
+
+  ctx.subscriptions.push(
+    { dispose: () => clearInterval(refreshTimer) },
+    { dispose: () => clearInterval(fetchTimer) },
+  );
 }
 
 export function deactivate() {
-  if (timer) { clearInterval(timer); }
+  clearInterval(refreshTimer);
+  clearInterval(fetchTimer);
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  Auto-reset on new month
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+//  Auto-reset on new calendar month
+// ══════════════════════════════════════════════════════════════════════
 
 function autoResetIfNewMonth(ctx: vscode.ExtensionContext) {
   const now = new Date();
@@ -72,11 +83,11 @@ function autoResetIfNewMonth(ctx: vscode.ExtensionContext) {
   }
 }
 
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
 //  Calculations
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
 
-function getMonthPercent(): { percent: number; day: number; lastDay: number } {
+function getMonthPercent() {
   const now     = new Date();
   const day     = now.getDate();
   const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -87,96 +98,233 @@ function getCopilotData(ctx: vscode.ExtensionContext) {
   const cfg   = vscode.workspace.getConfiguration('copilotUsageTracker');
   const limit = cfg.get<number>('monthlyRequestLimit', 300);
   const used  = ctx.globalState.get<number>('copilotRequestsUsed', 0);
-  const percent = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
-  return { used, limit, percent };
+  const pct   = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  return { used, limit, percent: pct };
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  Bar rendering
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+//  Stacked-bar rendering
+//   Each character column encodes TWO rows:
+//     top  = month progress   (▀)
+//     bot  = copilot usage    (▄)
+//     both = █,  neither = ░
+// ══════════════════════════════════════════════════════════════════════
 
-function makeBar(percent: number, length: number): string {
-  const filled = Math.round((percent / 100) * length);
-  return FILLED.repeat(filled) + EMPTY.repeat(length - filled);
+function makeStackedBar(topPct: number, botPct: number, len: number): string {
+  const tFill = Math.round((topPct / 100) * len);
+  const bFill = Math.round((botPct / 100) * len);
+  let bar = '';
+  for (let i = 0; i < len; i++) {
+    const t = i < tFill;
+    const b = i < bFill;
+    bar += t && b ? BOTH : t ? TOP : b ? BOT : NONE;
+  }
+  return bar;
 }
 
-function updateBars(ctx: vscode.ExtensionContext) {
+function render(ctx: vscode.ExtensionContext) {
   const cfg       = vscode.workspace.getConfiguration('copilotUsageTracker');
-  const barLength = cfg.get<number>('barLength', 10);
+  const barLength = cfg.get<number>('barLength', 12);
 
-  // ── Month bar (green) ─────────────────────────────────────────
   const { percent: mPct, day, lastDay } = getMonthPercent();
-  monthItem.text    = `$(calendar) ${makeBar(mPct, barLength)} ${mPct}%`;
-  monthItem.tooltip = new vscode.MarkdownString(
-    `**Month Progress**\n\nDay **${day}** of **${lastDay}**\n\n${mPct}% of the month has passed`,
-  );
-  monthItem.color   = new vscode.ThemeColor('charts.green');
-  monthItem.command = 'copilotUsageTracker.refresh';
-  monthItem.show();
+  const { used, limit, percent: cPct }  = getCopilotData(ctx);
 
-  // ── Copilot bar (red) ─────────────────────────────────────────
-  const { used, limit, percent: cPct } = getCopilotData(ctx);
-  copilotItem.text    = `$(zap) ${makeBar(cPct, barLength)} ${cPct}%`;
+  const bar = makeStackedBar(mPct, cPct, barLength);
 
+  // Compact text: M=month% | C=copilot%
+  statusItem.text = `$(graph) ${bar} ${mPct}|${cPct}`;
+
+  // ── Rich markdown tooltip ──────────────────────────────────────
   const status = cPct > mPct
-    ? '⚠️ **Over-utilising** — usage is ahead of month progress'
+    ? '⚠️ **Over-utilising** — Copilot usage is ahead of month'
     : '✅ **On track** — usage is within month progress';
 
-  copilotItem.tooltip = new vscode.MarkdownString(
-    `**Copilot Premium Requests**\n\n` +
-    `Used **${used}** of **${limit}**  (${cPct}%)\n\n` +
+  const md = new vscode.MarkdownString(
+    `**Copilot Usage Tracker**\n\n` +
+    `| | Row | Detail | % |\n` +
+    `|---|---|---|---|\n` +
+    `| ▀ | Month (top) | Day **${day}** / **${lastDay}** | **${mPct}%** |\n` +
+    `| ▄ | Copilot (bot) | **${used}** / **${limit}** reqs | **${cPct}%** |\n\n` +
     `${status}\n\n` +
-    `_Click to update usage count_`,
+    `---\n` +
+    `_Click to set usage manually_\n\n` +
+    `[$(sync) Fetch from GitHub](command:copilotUsageTracker.fetchUsage)` +
+    ` · [$(sign-in) Sign in](command:copilotUsageTracker.loginGitHub)`,
   );
-  copilotItem.color   = new vscode.ThemeColor('charts.red');
-  copilotItem.command = 'copilotUsageTracker.setUsage';
+  md.isTrusted = true;
+  statusItem.tooltip = md;
 
-  // Highlight with warning background when over-utilising
-  copilotItem.backgroundColor = cPct > mPct
+  // Warning background when over-utilising
+  statusItem.backgroundColor = cPct > mPct
     ? new vscode.ThemeColor('statusBarItem.warningBackground')
     : undefined;
 
-  copilotItem.show();
+  statusItem.show();
 }
 
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+//  GitHub API — auto-fetch premium request usage
+// ══════════════════════════════════════════════════════════════════════
+
+function ghGet(path: string, token: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: 'api.github.com',
+        path,
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+          'User-Agent': 'copilot-usage-tracker-vscode',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      },
+      res => {
+        let body = '';
+        res.on('data', d => (body += d));
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            try   { resolve(JSON.parse(body)); }
+            catch { resolve(null); }
+          } else {
+            resolve(null);
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(10_000, () => { req.destroy(); reject(new Error('timeout')); });
+    req.end();
+  });
+}
+
+/**
+ * Tries multiple GitHub API strategies to get the current user's
+ * premium Copilot request count.  Returns true on success.
+ */
+async function fetchUsageFromGitHub(
+  ctx: vscode.ExtensionContext,
+  silent: boolean,
+): Promise<boolean> {
+  try {
+    const session = await vscode.authentication.getSession(
+      'github',
+      ['read:user', 'read:org'],
+      { createIfNone: false },
+    );
+    if (!session) {
+      if (!silent) {
+        vscode.window.showWarningMessage(
+          'Not signed into GitHub. Use "Copilot Tracker: Sign in to GitHub" first.',
+        );
+      }
+      return false;
+    }
+    const token = session.accessToken;
+    const cfg   = vscode.workspace.getConfiguration('copilotUsageTracker');
+
+    // ── Strategy 1: org-level billing seats ──────────────────────
+    const org = cfg.get<string>('githubOrg', '');
+    if (org) {
+      const seats = await ghGet(
+        `/orgs/${encodeURIComponent(org)}/copilot/billing/seats`,
+        token,
+      );
+      if (seats?.seats) {
+        const login = session.account.label.toLowerCase();
+        const seat  = (seats.seats as any[]).find(
+          (s: any) => s.assignee?.login?.toLowerCase() === login,
+        );
+        if (seat && typeof seat.premium_requests_used === 'number') {
+          await ctx.globalState.update('copilotRequestsUsed', seat.premium_requests_used);
+          render(ctx);
+          if (!silent) {
+            vscode.window.showInformationMessage(
+              `Copilot usage synced from org: ${seat.premium_requests_used} requests`,
+            );
+          }
+          return true;
+        }
+      }
+    }
+
+    // ── Strategy 2: individual user copilot endpoints ────────────
+    for (const p of ['/user/copilot/billing/usage', '/user/copilot']) {
+      const data = await ghGet(p, token);
+      if (data && typeof data.premium_requests_used === 'number') {
+        await ctx.globalState.update('copilotRequestsUsed', data.premium_requests_used);
+        render(ctx);
+        if (!silent) {
+          vscode.window.showInformationMessage(
+            `Copilot usage synced: ${data.premium_requests_used} requests`,
+          );
+        }
+        return true;
+      }
+    }
+
+    if (!silent) {
+      const choice = await vscode.window.showWarningMessage(
+        'Could not auto-fetch usage. The API may not be available for your account type yet. Use manual entry.',
+        'Set Manually',
+      );
+      if (choice === 'Set Manually') {
+        vscode.commands.executeCommand('copilotUsageTracker.setUsage');
+      }
+    }
+    return false;
+  } catch {
+    if (!silent) {
+      vscode.window.showErrorMessage('Failed to contact GitHub API.');
+    }
+    return false;
+  }
+}
+
+async function refresh(ctx: vscode.ExtensionContext) {
+  await fetchUsageFromGitHub(ctx, true);
+  render(ctx);
+}
+
+// ══════════════════════════════════════════════════════════════════════
 //  Commands
-// ════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
 
 async function cmdSetUsage(ctx: vscode.ExtensionContext) {
   const current = ctx.globalState.get<number>('copilotRequestsUsed', 0);
   const input = await vscode.window.showInputBox({
-    prompt: 'Enter the number of premium Copilot requests used this month',
+    prompt: 'Premium Copilot requests used this month',
     value: current.toString(),
     validateInput: v => {
       const n = parseInt(v, 10);
-      return isNaN(n) || n < 0 ? 'Enter a valid non-negative number' : null;
+      return isNaN(n) || n < 0 ? 'Enter a non-negative number' : null;
     },
   });
   if (input === undefined) { return; }
   const val = parseInt(input, 10);
   await ctx.globalState.update('copilotRequestsUsed', val);
-  updateBars(ctx);
+  render(ctx);
   vscode.window.showInformationMessage(`Copilot usage set to ${val}`);
 }
 
 async function cmdIncrement(ctx: vscode.ExtensionContext) {
   const used = ctx.globalState.get<number>('copilotRequestsUsed', 0) + 1;
   await ctx.globalState.update('copilotRequestsUsed', used);
-  updateBars(ctx);
+  render(ctx);
 }
 
 async function cmdReset(ctx: vscode.ExtensionContext) {
   await ctx.globalState.update('copilotRequestsUsed', 0);
-  updateBars(ctx);
-  vscode.window.showInformationMessage('Copilot usage counter reset to 0');
+  render(ctx);
+  vscode.window.showInformationMessage('Copilot usage reset to 0');
 }
 
 async function cmdSetLimit() {
   const cfg     = vscode.workspace.getConfiguration('copilotUsageTracker');
   const current = cfg.get<number>('monthlyRequestLimit', 300);
   const input = await vscode.window.showInputBox({
-    prompt: 'Enter your monthly premium Copilot request limit',
+    prompt: 'Monthly premium request limit',
     value: current.toString(),
     validateInput: v => {
       const n = parseInt(v, 10);
@@ -185,4 +333,24 @@ async function cmdSetLimit() {
   });
   if (input === undefined) { return; }
   await cfg.update('monthlyRequestLimit', parseInt(input, 10), vscode.ConfigurationTarget.Global);
+}
+
+async function cmdFetchUsage(ctx: vscode.ExtensionContext) {
+  await fetchUsageFromGitHub(ctx, false);
+}
+
+async function cmdLoginGitHub(ctx: vscode.ExtensionContext) {
+  try {
+    const session = await vscode.authentication.getSession(
+      'github',
+      ['read:user', 'read:org'],
+      { createIfNone: true },
+    );
+    if (session) {
+      vscode.window.showInformationMessage(`Signed in as ${session.account.label}`);
+      await fetchUsageFromGitHub(ctx, false);
+    }
+  } catch {
+    vscode.window.showErrorMessage('GitHub sign-in failed.');
+  }
 }
