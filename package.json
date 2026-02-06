@@ -1,0 +1,76 @@
+{
+  "name": "copilot-usage-tracker",
+  "displayName": "Copilot Usage Tracker",
+  "description": "Two progress bars in the status bar showing month progress vs GitHub Copilot premium request usage — see at a glance if you're under or over-utilising.",
+  "version": "0.0.1",
+  "publisher": "amolk99",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "copilot",
+    "usage",
+    "tracker",
+    "status bar",
+    "progress"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Copilot Usage Tracker",
+      "properties": {
+        "copilotUsageTracker.monthlyRequestLimit": {
+          "type": "number",
+          "default": 300,
+          "description": "Your monthly premium Copilot request limit (e.g. 300 for Pro, 1000 for Business)."
+        },
+        "copilotUsageTracker.barLength": {
+          "type": "number",
+          "default": 10,
+          "minimum": 5,
+          "maximum": 20,
+          "description": "Character width of each progress bar."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "copilotUsageTracker.setUsage",
+        "title": "Copilot Tracker: Set Premium Requests Used"
+      },
+      {
+        "command": "copilotUsageTracker.incrementUsage",
+        "title": "Copilot Tracker: Increment Premium Requests (+1)"
+      },
+      {
+        "command": "copilotUsageTracker.resetUsage",
+        "title": "Copilot Tracker: Reset Premium Requests to 0"
+      },
+      {
+        "command": "copilotUsageTracker.refresh",
+        "title": "Copilot Tracker: Refresh Bars"
+      },
+      {
+        "command": "copilotUsageTracker.setLimit",
+        "title": "Copilot Tracker: Set Monthly Request Limit"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^18.19.0",
+    "typescript": "^5.3.0"
+  }
+}
