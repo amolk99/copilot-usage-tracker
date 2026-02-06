@@ -26,11 +26,6 @@
     "configuration": {
       "title": "Copilot Usage Tracker",
       "properties": {
-        "copilotUsageTracker.monthlyRequestLimit": {
-          "type": "number",
-          "default": 300,
-          "description": "Your monthly premium Copilot request limit (e.g. 300 for Pro, 1000 for Business)."
-        },
         "copilotUsageTracker.barLength": {
           "type": "number",
           "default": 12,
@@ -48,23 +43,15 @@
     "commands": [
       {
         "command": "copilotUsageTracker.setUsage",
-        "title": "Copilot Tracker: Set Premium Requests Used"
-      },
-      {
-        "command": "copilotUsageTracker.incrementUsage",
-        "title": "Copilot Tracker: Increment Premium Requests (+1)"
+        "title": "Copilot Tracker: Set Usage Percentage"
       },
       {
         "command": "copilotUsageTracker.resetUsage",
-        "title": "Copilot Tracker: Reset Premium Requests to 0"
+        "title": "Copilot Tracker: Reset Usage to 0%"
       },
       {
         "command": "copilotUsageTracker.refresh",
         "title": "Copilot Tracker: Refresh Bars"
-      },
-      {
-        "command": "copilotUsageTracker.setLimit",
-        "title": "Copilot Tracker: Set Monthly Request Limit"
       },
       {
         "command": "copilotUsageTracker.fetchUsage",

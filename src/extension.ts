@@ -29,10 +29,8 @@ export function activate(ctx: vscode.ExtensionContext) {
   // ── Commands ────────────────────────────────────────────────────
   const cmds: [string, () => any][] = [
     ['copilotUsageTracker.setUsage',       () => cmdSetUsage(ctx)],
-    ['copilotUsageTracker.incrementUsage', () => cmdIncrement(ctx)],
     ['copilotUsageTracker.resetUsage',     () => cmdReset(ctx)],
     ['copilotUsageTracker.refresh',        () => refresh(ctx)],
-    ['copilotUsageTracker.setLimit',       () => cmdSetLimit()],
     ['copilotUsageTracker.fetchUsage',     () => cmdFetchUsage(ctx)],
     ['copilotUsageTracker.loginGitHub',    () => cmdLoginGitHub(ctx)],
   ];
@@ -78,7 +76,7 @@ function autoResetIfNewMonth(ctx: vscode.ExtensionContext) {
   const now = new Date();
   const key = `${now.getFullYear()}-${now.getMonth()}`;
   if (ctx.globalState.get<string>('lastResetKey') !== key) {
-    ctx.globalState.update('copilotRequestsUsed', 0);
+    ctx.globalState.update('copilotPercentUsed', 0);
     ctx.globalState.update('lastResetKey', key);
   }
 }
@@ -94,12 +92,8 @@ function getMonthPercent() {
   return { percent: Math.round((day / lastDay) * 100), day, lastDay };
 }
 
-function getCopilotData(ctx: vscode.ExtensionContext) {
-  const cfg   = vscode.workspace.getConfiguration('copilotUsageTracker');
-  const limit = cfg.get<number>('monthlyRequestLimit', 300);
-  const used  = ctx.globalState.get<number>('copilotRequestsUsed', 0);
-  const pct   = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
-  return { used, limit, percent: pct };
+function getCopilotPercent(ctx: vscode.ExtensionContext): number {
+  return Math.min(100, Math.max(0, ctx.globalState.get<number>('copilotPercentUsed', 0)));
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -127,7 +121,7 @@ function render(ctx: vscode.ExtensionContext) {
   const barLength = cfg.get<number>('barLength', 12);
 
   const { percent: mPct, day, lastDay } = getMonthPercent();
-  const { used, limit, percent: cPct }  = getCopilotData(ctx);
+  const cPct = getCopilotPercent(ctx);
 
   const bar = makeStackedBar(mPct, cPct, barLength);
 
@@ -141,13 +135,13 @@ function render(ctx: vscode.ExtensionContext) {
 
   const md = new vscode.MarkdownString(
     `**Copilot Usage Tracker**\n\n` +
-    `| | Row | Detail | % |\n` +
-    `|---|---|---|---|\n` +
-    `| ▀ | Month (top) | Day **${day}** / **${lastDay}** | **${mPct}%** |\n` +
-    `| ▄ | Copilot (bot) | **${used}** / **${limit}** reqs | **${cPct}%** |\n\n` +
+    `| | Row | % Used |\n` +
+    `|---|---|---|\n` +
+    `| ▀ | Month (top) — Day ${day}/${lastDay} | **${mPct}%** |\n` +
+    `| ▄ | Copilot (bottom) | **${cPct}%** |\n\n` +
     `${status}\n\n` +
     `---\n` +
-    `_Click to set usage manually_\n\n` +
+    `_Click to set usage % · check [GitHub settings](https://github.com/settings/copilot)_\n\n` +
     `[$(sync) Fetch from GitHub](command:copilotUsageTracker.fetchUsage)` +
     ` · [$(sign-in) Sign in](command:copilotUsageTracker.loginGitHub)`,
   );
@@ -200,8 +194,26 @@ function ghGet(path: string, token: string): Promise<any> {
 }
 
 /**
+ * Extract a percentage from various possible API response shapes.
+ * Handles: { percentage_used }, { premium_requests_percentage },
+ *          { premium_requests_used, premium_requests_limit }, etc.
+ */
+function extractPercent(data: any): number | null {
+  // Direct percentage fields
+  if (typeof data.percentage_used === 'number') { return Math.round(data.percentage_used); }
+  if (typeof data.premium_requests_percentage === 'number') { return Math.round(data.premium_requests_percentage); }
+
+  // Compute from used/limit
+  if (typeof data.premium_requests_used === 'number' && typeof data.premium_requests_limit === 'number' && data.premium_requests_limit > 0) {
+    return Math.round((data.premium_requests_used / data.premium_requests_limit) * 100);
+  }
+
+  return null;
+}
+
+/**
  * Tries multiple GitHub API strategies to get the current user's
- * premium Copilot request count.  Returns true on success.
+ * premium Copilot request percentage.  Returns true on success.
  */
 async function fetchUsageFromGitHub(
   ctx: vscode.ExtensionContext,
@@ -236,15 +248,16 @@ async function fetchUsageFromGitHub(
         const seat  = (seats.seats as any[]).find(
           (s: any) => s.assignee?.login?.toLowerCase() === login,
         );
-        if (seat && typeof seat.premium_requests_used === 'number') {
-          await ctx.globalState.update('copilotRequestsUsed', seat.premium_requests_used);
-          render(ctx);
-          if (!silent) {
-            vscode.window.showInformationMessage(
-              `Copilot usage synced from org: ${seat.premium_requests_used} requests`,
-            );
+        if (seat) {
+          const pct = extractPercent(seat);
+          if (pct !== null) {
+            await ctx.globalState.update('copilotPercentUsed', pct);
+            render(ctx);
+            if (!silent) {
+              vscode.window.showInformationMessage(`Copilot usage synced from org: ${pct}%`);
+            }
+            return true;
           }
-          return true;
         }
       }
     }
@@ -252,15 +265,16 @@ async function fetchUsageFromGitHub(
     // ── Strategy 2: individual user copilot endpoints ────────────
     for (const p of ['/user/copilot/billing/usage', '/user/copilot']) {
       const data = await ghGet(p, token);
-      if (data && typeof data.premium_requests_used === 'number') {
-        await ctx.globalState.update('copilotRequestsUsed', data.premium_requests_used);
-        render(ctx);
-        if (!silent) {
-          vscode.window.showInformationMessage(
-            `Copilot usage synced: ${data.premium_requests_used} requests`,
-          );
+      if (data) {
+        const pct = extractPercent(data);
+        if (pct !== null) {
+          await ctx.globalState.update('copilotPercentUsed', pct);
+          render(ctx);
+          if (!silent) {
+            vscode.window.showInformationMessage(`Copilot usage synced: ${pct}%`);
+          }
+          return true;
         }
-        return true;
       }
     }
 
@@ -292,47 +306,28 @@ async function refresh(ctx: vscode.ExtensionContext) {
 // ══════════════════════════════════════════════════════════════════════
 
 async function cmdSetUsage(ctx: vscode.ExtensionContext) {
-  const current = ctx.globalState.get<number>('copilotRequestsUsed', 0);
+  const current = ctx.globalState.get<number>('copilotPercentUsed', 0);
   const input = await vscode.window.showInputBox({
-    prompt: 'Premium Copilot requests used this month',
+    prompt: 'Copilot premium requests used (%) — check github.com/settings/copilot',
     value: current.toString(),
+    placeHolder: '0–100',
     validateInput: v => {
       const n = parseInt(v, 10);
-      return isNaN(n) || n < 0 ? 'Enter a non-negative number' : null;
+      if (isNaN(n) || n < 0 || n > 100) { return 'Enter a number between 0 and 100'; }
+      return null;
     },
   });
   if (input === undefined) { return; }
   const val = parseInt(input, 10);
-  await ctx.globalState.update('copilotRequestsUsed', val);
+  await ctx.globalState.update('copilotPercentUsed', val);
   render(ctx);
-  vscode.window.showInformationMessage(`Copilot usage set to ${val}`);
-}
-
-async function cmdIncrement(ctx: vscode.ExtensionContext) {
-  const used = ctx.globalState.get<number>('copilotRequestsUsed', 0) + 1;
-  await ctx.globalState.update('copilotRequestsUsed', used);
-  render(ctx);
+  vscode.window.showInformationMessage(`Copilot usage set to ${val}%`);
 }
 
 async function cmdReset(ctx: vscode.ExtensionContext) {
-  await ctx.globalState.update('copilotRequestsUsed', 0);
+  await ctx.globalState.update('copilotPercentUsed', 0);
   render(ctx);
-  vscode.window.showInformationMessage('Copilot usage reset to 0');
-}
-
-async function cmdSetLimit() {
-  const cfg     = vscode.workspace.getConfiguration('copilotUsageTracker');
-  const current = cfg.get<number>('monthlyRequestLimit', 300);
-  const input = await vscode.window.showInputBox({
-    prompt: 'Monthly premium request limit',
-    value: current.toString(),
-    validateInput: v => {
-      const n = parseInt(v, 10);
-      return isNaN(n) || n <= 0 ? 'Enter a positive number' : null;
-    },
-  });
-  if (input === undefined) { return; }
-  await cfg.update('monthlyRequestLimit', parseInt(input, 10), vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage('Copilot usage reset to 0%');
 }
 
 async function cmdFetchUsage(ctx: vscode.ExtensionContext) {
